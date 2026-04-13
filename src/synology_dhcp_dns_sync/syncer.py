@@ -1,0 +1,274 @@
+"""Core sync workflow."""
+
+from __future__ import annotations
+
+import logging
+import os
+import shutil
+import subprocess
+import tempfile
+from datetime import datetime
+from pathlib import Path
+from typing import List, Optional
+
+from .config import SyncConfig
+from .dhcp import discover_interface_names, parse_dhcp_sources
+from .exceptions import ReloadError, SyncError
+from .locking import acquire_process_lock
+from .models import SyncResult, ZoneCandidate
+from .zone import (
+    build_forward_zone,
+    build_reverse_zone,
+    collect_static_claims,
+    filter_leases_for_static_claims,
+    read_zone_text,
+    run_named_checkzone,
+    strip_managed_records,
+    validate_managed_leases,
+    validate_zone_baseline,
+)
+
+
+def validate_runtime_environment(config: SyncConfig) -> List[str]:
+    """Validate that required files and directories exist."""
+
+    messages: List[str] = []
+    if not config.forward_zone_path.is_file():
+        raise SyncError(f"Forward zone file does not exist: {config.forward_zone_path}")
+    if not config.reverse_zone_path.is_file():
+        raise SyncError(f"Reverse zone file does not exist: {config.reverse_zone_path}")
+
+    dhcp_files = config.existing_dhcp_files()
+    if not dhcp_files:
+        raise SyncError("No configured DHCP source files exist.")
+    messages.append(f"Using DHCP sources: {', '.join(str(path) for path in dhcp_files)}")
+
+    if config.named_checkzone_path.exists():
+        if not os.access(config.named_checkzone_path, os.X_OK):
+            raise SyncError(f"named-checkzone is not executable: {config.named_checkzone_path}")
+        messages.append(f"Using named-checkzone: {config.named_checkzone_path}")
+    else:
+        messages.append(f"named-checkzone not found at {config.named_checkzone_path}; external validation will be skipped.")
+
+    if not config.reload_script_path.exists():
+        raise SyncError(f"Reload script does not exist: {config.reload_script_path}")
+    if not os.access(config.reload_script_path, os.X_OK):
+        raise SyncError(f"Reload script is not executable: {config.reload_script_path}")
+    messages.append(f"Using reload script: {config.reload_script_path}")
+    messages.append(f"Using sync lock: {config.effective_lock_path}")
+
+    validate_zone_baseline(config.forward_zone, read_zone_text(config.forward_zone_path))
+    validate_zone_baseline(config.reverse_zone, read_zone_text(config.reverse_zone_path))
+    messages.append("Forward and reverse zone baselines are structurally valid.")
+
+    return messages
+
+
+def perform_sync(
+    config: SyncConfig,
+    *,
+    dry_run: bool = False,
+    logger: Optional[logging.Logger] = None,
+) -> SyncResult:
+    """Perform a full DHCP to DNS sync."""
+
+    log = logger or logging.getLogger(__name__)
+    with acquire_process_lock(config.effective_lock_path):
+        validation_messages = validate_runtime_environment(config)
+        for message in validation_messages:
+            log.info(message)
+
+        config.work_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+
+        forward_live_text = read_zone_text(config.forward_zone_path)
+        reverse_live_text = read_zone_text(config.reverse_zone_path)
+        validate_zone_baseline(config.forward_zone, forward_live_text)
+        validate_zone_baseline(config.reverse_zone, reverse_live_text)
+
+        forward_static_text, forward_static_records = strip_managed_records(
+            forward_live_text,
+            zone_name=config.forward_zone,
+        )
+        reverse_static_text, reverse_static_records = strip_managed_records(
+            reverse_live_text,
+            zone_name=config.reverse_zone,
+        )
+        static_forward_owners, static_reverse_owners = collect_static_claims(
+            forward_static_records,
+            reverse_static_records,
+        )
+
+        leases = parse_dhcp_sources(
+            config.existing_dhcp_files(),
+            domain=config.normalized_domain,
+            interface_names=discover_interface_names(),
+        )
+        managed_leases, skipped_records = filter_leases_for_static_claims(
+            leases,
+            reverse_zone=config.reverse_zone,
+            static_forward_owners=static_forward_owners,
+            static_reverse_owners=static_reverse_owners,
+        )
+        validate_managed_leases(managed_leases)
+
+        forward_candidate_text = build_forward_zone(forward_static_text, managed_leases)
+        reverse_candidate_text = build_reverse_zone(reverse_static_text, managed_leases)
+
+        forward_candidate = _write_candidate(
+            config.forward_zone_path,
+            config.work_dir,
+            timestamp,
+            "forward",
+            forward_candidate_text,
+        )
+        reverse_candidate = _write_candidate(
+            config.reverse_zone_path,
+            config.work_dir,
+            timestamp,
+            "reverse",
+            reverse_candidate_text,
+        )
+
+        validation_messages.append(
+            run_named_checkzone(config.named_checkzone_path, config.forward_zone, forward_candidate.candidate_path)
+        )
+        validation_messages.append(
+            run_named_checkzone(config.named_checkzone_path, config.reverse_zone, reverse_candidate.candidate_path)
+        )
+
+        changed = (
+            forward_candidate_text != forward_live_text
+            or reverse_candidate_text != reverse_live_text
+        )
+
+        if dry_run or not changed:
+            if dry_run:
+                log.info("Dry-run complete; live zones were not modified.")
+            else:
+                log.info("No zone changes detected; skipping zone update and reload.")
+            return SyncResult(
+                changed=changed,
+                dry_run=dry_run,
+                managed_records=len(managed_leases),
+                skipped_records=skipped_records,
+                forward_candidate_path=forward_candidate.candidate_path,
+                reverse_candidate_path=reverse_candidate.candidate_path,
+                validation_messages=validation_messages,
+            )
+
+        _backup_live_zone(config.forward_zone_path, forward_candidate.backup_path)
+        _backup_live_zone(config.reverse_zone_path, reverse_candidate.backup_path)
+
+        replaced_forward = False
+        replaced_reverse = False
+        try:
+            _replace_candidate(forward_candidate)
+            replaced_forward = True
+            _replace_candidate(reverse_candidate)
+            replaced_reverse = True
+            _reload_dns(config.reload_script_path)
+        except Exception:
+            log.exception("Sync failed after candidate generation; attempting rollback.")
+            if replaced_forward:
+                _restore_backup(config.forward_zone_path, forward_candidate.backup_path)
+            if replaced_reverse:
+                _restore_backup(config.reverse_zone_path, reverse_candidate.backup_path)
+            if replaced_forward or replaced_reverse:
+                try:
+                    _reload_dns(config.reload_script_path)
+                except Exception:
+                    log.exception("Rollback reload also failed.")
+            raise
+
+        return SyncResult(
+            changed=True,
+            dry_run=False,
+            managed_records=len(managed_leases),
+            skipped_records=skipped_records,
+            forward_candidate_path=forward_candidate.candidate_path,
+            reverse_candidate_path=reverse_candidate.candidate_path,
+            validation_messages=validation_messages,
+        )
+
+
+def _write_candidate(
+    live_path: Path,
+    work_dir: Path,
+    timestamp: str,
+    label: str,
+    content: str,
+) -> ZoneCandidate:
+    candidate_path = work_dir / f"{live_path.name}.{timestamp}.{label}.candidate"
+    backup_path = work_dir / f"{live_path.name}.{timestamp}.{label}.bak"
+    candidate_path.write_text(content)
+    return ZoneCandidate(
+        zone_name=live_path.name,
+        live_path=live_path,
+        candidate_path=candidate_path,
+        backup_path=backup_path,
+        content=content,
+    )
+
+
+def _backup_live_zone(live_path: Path, backup_path: Path) -> None:
+    shutil.copy2(live_path, backup_path)
+
+
+def _replace_candidate(candidate: ZoneCandidate) -> None:
+    staged_path = _stage_for_atomic_replace(candidate.candidate_path, candidate.live_path)
+    os.replace(staged_path, candidate.live_path)
+
+
+def _restore_backup(live_path: Path, backup_path: Path) -> None:
+    restore_path = _stage_for_atomic_replace(backup_path, live_path)
+    os.replace(restore_path, live_path)
+
+
+def _stage_for_atomic_replace(source_path: Path, live_path: Path) -> Path:
+    temp_handle = tempfile.NamedTemporaryFile(
+        prefix=f".{live_path.name}.",
+        suffix=".tmp",
+        dir=str(live_path.parent),
+        delete=False,
+    )
+    temp_handle.close()
+    staged_path = Path(temp_handle.name)
+    try:
+        shutil.copy2(source_path, staged_path)
+        _copy_live_metadata(live_path, staged_path)
+        return staged_path
+    except Exception:
+        try:
+            staged_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _copy_live_metadata(live_path: Path, staged_path: Path) -> None:
+    live_stat = live_path.stat()
+    os.chmod(staged_path, live_stat.st_mode)
+    try:
+        os.chown(staged_path, live_stat.st_uid, live_stat.st_gid)
+    except PermissionError:
+        # If the sync is not running with enough privileges, the replace step
+        # would fail shortly afterwards anyway.
+        pass
+
+
+def _reload_dns(reload_script_path: Path) -> None:
+    if not reload_script_path.exists():
+        raise ReloadError(f"Reload script does not exist: {reload_script_path}")
+
+    completed = subprocess.run(
+        (str(reload_script_path),),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        combined_output = "\n".join(
+            part for part in (completed.stdout.strip(), completed.stderr.strip()) if part
+        )
+        raise ReloadError(f"DNS reload failed: {combined_output or 'unknown error'}")
