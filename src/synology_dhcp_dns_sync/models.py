@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from ipaddress import IPv4Address
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 
 @dataclass(frozen=True)
@@ -39,6 +39,7 @@ class SyncResult:
     dry_run: bool
     managed_records: int
     skipped_records: int
-    forward_candidate_path: Path
-    reverse_candidate_path: Path
+    # Only set for dry runs, the one case where candidate files are kept for inspection.
+    forward_candidate_path: Optional[Path] = None
+    reverse_candidate_path: Optional[Path] = None
     validation_messages: List[str] = field(default_factory=list)

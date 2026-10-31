@@ -178,9 +178,9 @@ def validate_managed_leases(leases: List[LeaseRecord]) -> None:
         ip_to_fqdn[ip_text] = lease.fqdn
 
 
-def build_forward_zone(zone_text: str, leases: List[LeaseRecord]) -> str:
-    bumped = increment_soa_serial(zone_text)
-    body = bumped.rstrip("\n")
+def build_forward_zone(zone_text: str, leases: List[LeaseRecord], *, bump_serial: bool = True) -> str:
+    base = increment_soa_serial(zone_text) if bump_serial else zone_text
+    body = base.rstrip("\n")
     dynamic_lines = [
         f"{lease.fqdn}\t{lease.ttl}\tA\t{lease.ip}\t;dynamic {MANAGED_COMMENT_MARKER}"
         for lease in leases
@@ -195,9 +195,9 @@ def build_forward_zone(zone_text: str, leases: List[LeaseRecord]) -> str:
     return body
 
 
-def build_reverse_zone(zone_text: str, leases: List[LeaseRecord]) -> str:
-    bumped = increment_soa_serial(zone_text)
-    body = bumped.rstrip("\n")
+def build_reverse_zone(zone_text: str, leases: List[LeaseRecord], *, bump_serial: bool = True) -> str:
+    base = increment_soa_serial(zone_text) if bump_serial else zone_text
+    body = base.rstrip("\n")
     dynamic_lines = [
         (
             f"{lease.ip.reverse_pointer}.\t{lease.ttl}\tPTR\t{lease.fqdn}\t"

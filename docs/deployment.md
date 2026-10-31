@@ -66,7 +66,11 @@ Create a scheduled task in DSM:
 - Control Panel > Task Scheduler
 - Create > Scheduled Task > User-defined script
 - User: `root`
-- Schedule: every 1 minute
+- Schedule: run daily, first run time `00:00`, frequency every 1 minute, last run time `23:59`
+
+The last run time defaults to the first run time's hour, which makes the task run only from 00:00 to 00:59. Check the generated line in `/etc/crontab`: the hour field must be `*` or list every hour, not `0`.
+
+Runs where no lease changed write nothing and don't reload DNS. A run that changes a zone backs up the live zone into `work_dir` first. The last 20 backups per zone are kept, and leftover candidate files are removed. Candidates from `sync --dry-run` stay in `work_dir` until the next scheduled run.
 
 Script:
 

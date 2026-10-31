@@ -21,12 +21,16 @@ from .zone import (
     build_reverse_zone,
     collect_static_claims,
     filter_leases_for_static_claims,
+    increment_soa_serial,
     read_zone_text,
     run_named_checkzone,
     strip_managed_records,
     validate_managed_leases,
     validate_zone_baseline,
 )
+
+# Live-zone backups kept per zone in work_dir; each changed sync adds one.
+BACKUPS_TO_KEEP = 20
 
 
 def validate_runtime_environment(config: SyncConfig) -> List[str]:
@@ -112,8 +116,28 @@ def perform_sync(
         )
         validate_managed_leases(managed_leases)
 
-        forward_candidate_text = build_forward_zone(forward_static_text, managed_leases)
-        reverse_candidate_text = build_reverse_zone(reverse_static_text, managed_leases)
+        # Compare with the serial untouched: bumping first would make every run look like a change.
+        forward_candidate_text = build_forward_zone(forward_static_text, managed_leases, bump_serial=False)
+        reverse_candidate_text = build_reverse_zone(reverse_static_text, managed_leases, bump_serial=False)
+        changed = (
+            forward_candidate_text != forward_live_text
+            or reverse_candidate_text != reverse_live_text
+        )
+
+        if not changed and not dry_run:
+            _prune_work_dir(config)
+            log.info("No zone changes detected; skipping zone update and reload.")
+            return SyncResult(
+                changed=False,
+                dry_run=False,
+                managed_records=len(managed_leases),
+                skipped_records=skipped_records,
+                validation_messages=validation_messages,
+            )
+
+        if changed:
+            forward_candidate_text = increment_soa_serial(forward_candidate_text)
+            reverse_candidate_text = increment_soa_serial(reverse_candidate_text)
 
         forward_candidate = _write_candidate(
             config.forward_zone_path,
@@ -137,16 +161,8 @@ def perform_sync(
             run_named_checkzone(config.named_checkzone_path, config.reverse_zone, reverse_candidate.candidate_path)
         )
 
-        changed = (
-            forward_candidate_text != forward_live_text
-            or reverse_candidate_text != reverse_live_text
-        )
-
-        if dry_run or not changed:
-            if dry_run:
-                log.info("Dry-run complete; live zones were not modified.")
-            else:
-                log.info("No zone changes detected; skipping zone update and reload.")
+        if dry_run:
+            log.info("Dry-run complete; live zones were not modified.")
             return SyncResult(
                 changed=changed,
                 dry_run=dry_run,
@@ -181,15 +197,29 @@ def perform_sync(
                     log.exception("Rollback reload also failed.")
             raise
 
+        _prune_work_dir(config)
         return SyncResult(
             changed=True,
             dry_run=False,
             managed_records=len(managed_leases),
             skipped_records=skipped_records,
-            forward_candidate_path=forward_candidate.candidate_path,
-            reverse_candidate_path=reverse_candidate.candidate_path,
             validation_messages=validation_messages,
         )
+
+
+def _prune_work_dir(config: SyncConfig) -> None:
+    """Delete candidate files and all but the newest backups of each zone.
+
+    Candidates are only kept by dry runs, for inspection; the next scheduled
+    run removes them. Timestamps in the file names sort chronologically.
+    """
+
+    for zone_path, label in ((config.forward_zone_path, "forward"), (config.reverse_zone_path, "reverse")):
+        for candidate_path in config.work_dir.glob(f"{zone_path.name}.*.{label}.candidate"):
+            candidate_path.unlink()
+        backups = sorted(config.work_dir.glob(f"{zone_path.name}.*.{label}.bak"))
+        for backup_path in backups[:-BACKUPS_TO_KEEP]:
+            backup_path.unlink()
 
 
 def _write_candidate(

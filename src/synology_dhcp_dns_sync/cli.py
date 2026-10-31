@@ -43,13 +43,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.command == "sync":
             result = perform_sync(config, dry_run=args.dry_run, logger=logger)
             logger.info(
-                "Sync complete: changed=%s managed_records=%s skipped_records=%s forward_candidate=%s reverse_candidate=%s",
+                "Sync complete: changed=%s managed_records=%s skipped_records=%s",
                 result.changed,
                 result.managed_records,
                 result.skipped_records,
-                result.forward_candidate_path,
-                result.reverse_candidate_path,
             )
+            if result.dry_run:
+                logger.info(
+                    "Candidates kept: forward=%s reverse=%s",
+                    result.forward_candidate_path,
+                    result.reverse_candidate_path,
+                )
             return 0
 
         if args.command == "validate-config":
