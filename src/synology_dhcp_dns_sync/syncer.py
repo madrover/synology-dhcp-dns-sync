@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from .config import SyncConfig
-from .dhcp import discover_interface_names, parse_dhcp_sources
+from .dhcp import discover_interface_names, parse_dhcp_sources, resolve_conflicts
 from .exceptions import ReloadError, SyncError
 from .locking import acquire_process_lock
 from .models import SyncResult, ZoneCandidate
@@ -107,6 +107,7 @@ def perform_sync(
             config.existing_dhcp_files(),
             domain=config.normalized_domain,
             interface_names=discover_interface_names(),
+            ttl=config.dynamic_ttl,
         )
         managed_leases, skipped_records = filter_leases_for_static_claims(
             leases,
@@ -114,6 +115,16 @@ def perform_sync(
             static_forward_owners=static_forward_owners,
             static_reverse_owners=static_reverse_owners,
         )
+        managed_leases, conflicting = resolve_conflicts(managed_leases)
+        for lease in conflicting:
+            log.warning(
+                "Skipping %s (%s) from %s:%s: hostname or IP already taken by a preferred entry.",
+                lease.fqdn,
+                lease.ip,
+                lease.source_path,
+                lease.line_number,
+            )
+        skipped_records += len(conflicting)
         validate_managed_leases(managed_leases)
 
         # Compare with the serial untouched: bumping first would make every run look like a change.

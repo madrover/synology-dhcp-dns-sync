@@ -13,13 +13,15 @@ DEFAULT_ZONE_ROOT_DIR = Path("/var/packages/DNSServer/target")
 DEFAULT_ZONE_DIR = DEFAULT_ZONE_ROOT_DIR / "named" / "etc" / "zone" / "master"
 DEFAULT_NAMED_CHECKZONE_PATH = DEFAULT_ZONE_ROOT_DIR / "bin" / "named-checkzone"
 DEFAULT_RELOAD_SCRIPT_PATH = DEFAULT_ZONE_ROOT_DIR / "script" / "reload.sh"
+# Entries may be glob patterns: DSM names the reservations file after the
+# interface (dhcpd-eth0-static.conf, dhcpd-ovs_bond0-static.conf, ...).
 DEFAULT_DHCP_FILES = (
     Path("/etc/dhcpd/dhcpd.conf"),
     Path("/etc/dhcpd/dhcpd-leases.log"),
-    Path("/etc/dhcpd/dhcpd-static-static.conf"),
-    Path("/etc/dhcpd/dhcpd-eth0-static.conf"),
+    Path("/etc/dhcpd/dhcpd-*-static.conf"),
     Path("/etc/dhcpd/dhcpd.conf.leases"),
 )
+DEFAULT_DYNAMIC_TTL = 600
 
 
 @dataclass(frozen=True)
@@ -30,6 +32,7 @@ class SyncConfig:
     forward_zone: str
     reverse_zone: str
     poll_interval_seconds: int = 5
+    dynamic_ttl: int = DEFAULT_DYNAMIC_TTL
     zone_root_dir: Path = DEFAULT_ZONE_ROOT_DIR
     zone_dir: Path = DEFAULT_ZONE_DIR
     work_dir: Path = Path("work")
@@ -55,7 +58,11 @@ class SyncConfig:
         return f"{self.reverse_zone.rstrip('.') }."
 
     def existing_dhcp_files(self) -> Tuple[Path, ...]:
-        return tuple(path for path in self.dhcp_files if path.is_file())
+        existing = []
+        for path in self.dhcp_files:
+            matches = sorted(path.parent.glob(path.name)) if any(c in path.name for c in "*?[") else [path]
+            existing.extend(match for match in matches if match.is_file() and match not in existing)
+        return tuple(existing)
 
     @property
     def effective_lock_path(self) -> Path:
@@ -78,6 +85,7 @@ def load_config(path: Union[str, Path]) -> SyncConfig:
     forward_zone = sync_section.get("forward_zone", "").strip().rstrip(".")
     reverse_zone = sync_section.get("reverse_zone", "").strip().rstrip(".")
     poll_interval_seconds = sync_section.getint("poll_interval_seconds", fallback=5)
+    dynamic_ttl = sync_section.getint("dynamic_ttl", fallback=DEFAULT_DYNAMIC_TTL)
 
     if not domain:
         raise ConfigError("sync.domain is required.")
@@ -87,6 +95,8 @@ def load_config(path: Union[str, Path]) -> SyncConfig:
         raise ConfigError("sync.reverse_zone is required.")
     if poll_interval_seconds <= 0:
         raise ConfigError("sync.poll_interval_seconds must be greater than zero.")
+    if dynamic_ttl <= 0:
+        raise ConfigError("sync.dynamic_ttl must be greater than zero.")
 
     paths_section = parser["paths"] if parser.has_section("paths") else {}
 
@@ -109,6 +119,7 @@ def load_config(path: Union[str, Path]) -> SyncConfig:
         forward_zone=forward_zone,
         reverse_zone=reverse_zone,
         poll_interval_seconds=poll_interval_seconds,
+        dynamic_ttl=dynamic_ttl,
         zone_root_dir=zone_root_dir,
         zone_dir=zone_dir,
         work_dir=work_dir,

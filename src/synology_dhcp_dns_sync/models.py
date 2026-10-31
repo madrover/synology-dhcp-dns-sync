@@ -18,6 +18,10 @@ class LeaseRecord:
     ttl: int
     source_path: Path
     line_number: int
+    # Static reservations (dhcp-host) win hostname/IP conflicts over dynamic leases;
+    # among leases, the one expiring last wins.
+    static: bool = False
+    expires: int = 0
 
 
 @dataclass(frozen=True)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import subprocess
 from dataclasses import dataclass
@@ -15,6 +16,8 @@ MANAGED_COMMENT_MARKER = "managed-by:synology-dhcp-dns-sync"
 KNOWN_RECORD_TYPES = {"A", "PTR", "NS", "SOA", "AAAA", "CNAME", "MX", "TXT", "SRV"}
 KNOWN_DNS_CLASSES = {"IN", "CH", "HS"}
 SERIAL_RE = re.compile(r"^(\s*)(\d+)(\s*(?:;.*)?)$")
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -119,13 +122,14 @@ def collect_static_claims(
     static_forward_records: List[ParsedZoneLine],
     static_reverse_records: List[ParsedZoneLine],
 ) -> Tuple[Set[str], Set[str]]:
+    # A CNAME owner can't hold any other record, so a lease with that name would break the zone.
     static_forward_owners = {
-        record.owner
+        record.owner.lower()
         for record in static_forward_records
-        if record.record_type == "A"
+        if record.record_type in {"A", "CNAME"}
     }
     static_reverse_owners = {
-        record.owner
+        record.owner.lower()
         for record in static_reverse_records
         if record.record_type == "PTR"
     }
@@ -146,9 +150,9 @@ def filter_leases_for_static_claims(
     for lease in leases:
         reverse_owner = f"{lease.ip.reverse_pointer}."
         if not reverse_owner.endswith(suffix):
-            raise ZoneValidationError(
-                f"Lease {lease.ip} is outside reverse zone {reverse_zone}."
-            )
+            log.warning("Skipping %s (%s): outside reverse zone %s.", lease.fqdn, lease.ip, reverse_zone)
+            skipped += 1
+            continue
         if lease.fqdn in static_forward_owners or reverse_owner in static_reverse_owners:
             skipped += 1
             continue
