@@ -76,12 +76,15 @@ Recommended task:
 - Control Panel > Task Scheduler
 - Create > Scheduled Task > User-defined script
 - User: `root`
-- Schedule: every 1 minute
+- Schedule: daily, every 1 minute, first run `00:00`, **last run `23:59`** (the default last run time limits it to the first hour)
+- Settings: send run details by email only when the script terminates abnormally
 - Script:
 
 ```sh
-/volume1/homes/<user>/scripts/synology-dhcp-dns-sync/scripts/run-sync.sh /volume1/homes/<user>/scripts/synology-dhcp-dns-sync/config.ini >> /volume1/homes/<user>/scripts/synology-dhcp-dns-sync/logs/sync.log 2>&1
+/volume1/homes/<user>/scripts/synology-dhcp-dns-sync/scripts/run-sync.sh /volume1/homes/<user>/scripts/synology-dhcp-dns-sync/config.ini --log-file /volume1/homes/<user>/scripts/synology-dhcp-dns-sync/logs/sync.log
 ```
+
+The log records only zone changes, skipped leases and failures, and rotates at 1 MB. Details, `--verbose`, `--force` and updating with `scripts/deploy.sh`: [docs/deployment.md](docs/deployment.md).
 
 Why this is the default:
 

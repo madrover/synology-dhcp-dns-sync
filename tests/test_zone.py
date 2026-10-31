@@ -123,6 +123,33 @@ class ZoneRenderingTests(unittest.TestCase):
         self.assertEqual(skipped, 1)
         self.assertEqual(leases, [])
 
+    def test_static_cname_and_mixed_case_owners_claim_the_name(self) -> None:
+        zone_text = FORWARD_ZONE_TEXT + "tv IN CNAME router\nNAS IN A 192.0.2.5\n"
+        _, forward_records = strip_managed_records(zone_text, zone_name="home.arpa")
+        static_forward_owners, static_reverse_owners = collect_static_claims(forward_records, [])
+
+        leases, skipped = filter_leases_for_static_claims(
+            [_lease("192.0.2.40", "tv"), _lease("192.0.2.41", "nas"), _lease("192.0.2.42", "laptop")],
+            reverse_zone="2.0.192.in-addr.arpa",
+            static_forward_owners=static_forward_owners,
+            static_reverse_owners=static_reverse_owners,
+        )
+
+        self.assertEqual([lease.hostname for lease in leases], ["laptop"])
+        self.assertEqual(skipped, 2)
+
+    def test_lease_outside_reverse_zone_is_skipped_not_fatal(self) -> None:
+        with self.assertLogs("synology_dhcp_dns_sync.zone", level="WARNING"):
+            leases, skipped = filter_leases_for_static_claims(
+                [_lease("198.51.100.7", "guest"), _lease("192.0.2.42", "laptop")],
+                reverse_zone="2.0.192.in-addr.arpa",
+                static_forward_owners=set(),
+                static_reverse_owners=set(),
+            )
+
+        self.assertEqual([lease.hostname for lease in leases], ["laptop"])
+        self.assertEqual(skipped, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
