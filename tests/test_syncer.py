@@ -70,6 +70,23 @@ class SyncerTests(unittest.TestCase):
             self.assertEqual(config.reverse_zone_path.read_text(), reverse_after_first)
             self.assertEqual(self._reload_count(config), reloads_after_first)
 
+    def test_changed_sync_logs_which_hosts_changed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = self._build_config(Path(temp_dir), reload_exit_code=0)
+            logger = logging.getLogger(f"test-syncer-changes-{id(self)}")
+            logger.propagate = False
+
+            with self.assertLogs(logger, level="INFO") as logs:
+                perform_sync(config, logger=logger)
+
+        self.assertEqual(
+            logs.output,
+            [
+                f"INFO:{logger.name}:Zone changes: added newhost.home.arpa. 192.0.2.150; "
+                "removed oldhost.home.arpa. 192.0.2.150"
+            ],
+        )
+
     def test_changed_sync_bumps_serial_once(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             config = self._build_config(Path(temp_dir), reload_exit_code=0)

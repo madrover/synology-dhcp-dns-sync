@@ -75,10 +75,16 @@ Runs where no lease changed write nothing and don't reload DNS. A run that chang
 Script:
 
 ```sh
-/volume1/homes/<user>/scripts/synology-dhcp-dns-sync/scripts/run-sync.sh /volume1/homes/<user>/scripts/synology-dhcp-dns-sync/config.ini >> /volume1/homes/<user>/scripts/synology-dhcp-dns-sync/logs/sync.log 2>&1
+/volume1/homes/<user>/scripts/synology-dhcp-dns-sync/scripts/run-sync.sh /volume1/homes/<user>/scripts/synology-dhcp-dns-sync/config.ini --log-file /volume1/homes/<user>/scripts/synology-dhcp-dns-sync/logs/sync.log
 ```
 
-The wrapper script sets `PYTHONPATH` for the repo layout and invokes the one-shot `sync` command.
+The wrapper script sets `PYTHONPATH` for the repo layout and invokes the one-shot `sync` command. Extra arguments are passed through.
+
+### Logging
+
+`--log-file` writes to a file that rotates at 1 MB, keeping 5 old files (`sync.log.1` … `sync.log.5`). Don't also redirect output with `>>`: the file would be written twice, and the redirect bypasses rotation.
+
+At the default level the log only records events: zone changes (which hosts were added, removed or moved), skipped leases (warnings) and failures. A run where nothing changed writes nothing. Add `--verbose` to also log the runtime checks and every unchanged run.
 
 ## Optional Watcher Mode
 

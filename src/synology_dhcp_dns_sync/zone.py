@@ -61,6 +61,18 @@ def strip_managed_records(zone_text: str, *, zone_name: str) -> Tuple[str, List[
     return preserved_text, static_records
 
 
+def managed_forward_records(zone_text: str, *, zone_name: str) -> Dict[str, str]:
+    """Return the A records this tool manages, as lowercase FQDN -> IP."""
+
+    records: Dict[str, str] = {}
+    current_owner: Optional[str] = None
+    for line in zone_text.splitlines():
+        parsed, current_owner = parse_zone_line_with_state(line, origin=zone_name, current_owner=current_owner)
+        if parsed is not None and parsed.record_type == "A" and _is_managed_dynamic_line(line, "A"):
+            records[parsed.owner.lower()] = parsed.value or ""
+    return records
+
+
 def parse_zone_line(line: str, *, origin: str) -> Optional[ParsedZoneLine]:
     parsed, _ = parse_zone_line_with_state(line, origin=origin, current_owner=None)
     return parsed

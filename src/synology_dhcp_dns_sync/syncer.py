@@ -9,19 +9,20 @@ import subprocess
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from .config import SyncConfig
 from .dhcp import discover_interface_names, parse_dhcp_sources, resolve_conflicts
 from .exceptions import ReloadError, SyncError
 from .locking import acquire_process_lock
-from .models import SyncResult, ZoneCandidate
+from .models import LeaseRecord, SyncResult, ZoneCandidate
 from .zone import (
     build_forward_zone,
     build_reverse_zone,
     collect_static_claims,
     filter_leases_for_static_claims,
     increment_soa_serial,
+    managed_forward_records,
     read_zone_text,
     run_named_checkzone,
     strip_managed_records,
@@ -80,7 +81,7 @@ def perform_sync(
     with acquire_process_lock(config.effective_lock_path):
         validation_messages = validate_runtime_environment(config)
         for message in validation_messages:
-            log.info(message)
+            log.debug(message)
 
         config.work_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -135,9 +136,18 @@ def perform_sync(
             or reverse_candidate_text != reverse_live_text
         )
 
+        if changed:
+            log.info(
+                "Zone changes: %s",
+                _describe_changes(
+                    managed_forward_records(forward_live_text, zone_name=config.forward_zone),
+                    managed_leases,
+                ),
+            )
+
         if not changed and not dry_run:
             _prune_work_dir(config)
-            log.info("No zone changes detected; skipping zone update and reload.")
+            log.debug("No zone changes detected; skipping zone update and reload.")
             return SyncResult(
                 changed=False,
                 dry_run=False,
@@ -216,6 +226,26 @@ def perform_sync(
             skipped_records=skipped_records,
             validation_messages=validation_messages,
         )
+
+
+def _describe_changes(previous: Dict[str, str], leases: List[LeaseRecord]) -> str:
+    current = {lease.fqdn: str(lease.ip) for lease in leases}
+    parts = []
+    added = [f"{name} {current[name]}" for name in sorted(current) if name not in previous]
+    removed = [f"{name} {previous[name]}" for name in sorted(previous) if name not in current]
+    moved = [
+        f"{name} {previous[name]} -> {current[name]}"
+        for name in sorted(current)
+        if name in previous and previous[name] != current[name]
+    ]
+    if added:
+        parts.append("added " + ", ".join(added))
+    if removed:
+        parts.append("removed " + ", ".join(removed))
+    if moved:
+        parts.append("moved " + ", ".join(moved))
+    # Same hosts and addresses, different text: TTL, case or record formatting.
+    return "; ".join(parts) or "records rewritten (TTL or formatting)"
 
 
 def _prune_work_dir(config: SyncConfig) -> None:
