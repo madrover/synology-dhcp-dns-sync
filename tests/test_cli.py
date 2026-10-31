@@ -58,6 +58,17 @@ class CliTests(unittest.TestCase):
         self.assertIn("DEBUG Sync complete: changed=False", lines[1])
 
 
+class CliFailureTests(unittest.TestCase):
+    def test_unexpected_error_is_logged_and_exits_non_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = _write_config(Path(temp_dir))
+            with mock.patch("synology_dhcp_dns_sync.cli.perform_sync", side_effect=OSError("disk full")):
+                with self.assertLogs("synology_dhcp_dns_sync", level="ERROR"):
+                    exit_code = cli.main(["sync", "--config", str(config_path)])
+
+        self.assertEqual(exit_code, 1)
+
+
 def _write_config(root: Path) -> Path:
     config_path = root / "config.ini"
     config_path.write_text(

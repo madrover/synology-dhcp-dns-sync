@@ -47,3 +47,5 @@ class SyncResult:
     forward_candidate_path: Optional[Path] = None
     reverse_candidate_path: Optional[Path] = None
     validation_messages: List[str] = field(default_factory=list)
+    # True when the inputs were unchanged since the last run and nothing was parsed.
+    skipped_unchanged: bool = False

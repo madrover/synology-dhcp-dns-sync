@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import stat
 import tempfile
 import unittest
@@ -63,12 +64,32 @@ class SyncerTests(unittest.TestCase):
             reverse_after_first = config.reverse_zone_path.read_text()
             reloads_after_first = self._reload_count(config)
 
-            result = perform_sync(config, logger=self._logger())
+            # force skips the unchanged-inputs shortcut, so the zone comparison itself is tested.
+            result = perform_sync(config, force=True, logger=self._logger())
 
             self.assertFalse(result.changed)
+            self.assertFalse(result.skipped_unchanged)
             self.assertEqual(config.forward_zone_path.read_text(), forward_after_first)
             self.assertEqual(config.reverse_zone_path.read_text(), reverse_after_first)
             self.assertEqual(self._reload_count(config), reloads_after_first)
+
+    def test_unchanged_inputs_skip_the_run_until_a_source_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = self._build_config(Path(temp_dir), reload_exit_code=0)
+            perform_sync(config, logger=self._logger())
+
+            skipped = perform_sync(config, logger=self._logger())
+            self.assertTrue(skipped.skipped_unchanged)
+
+            dhcp_source = config.dhcp_files[0]
+            dhcp_source.write_text("1728392012 aa:bb:cc:dd:ee:ff 192.0.2.151 newhost eth0\n")
+            stat_result = dhcp_source.stat()
+            os.utime(dhcp_source, ns=(stat_result.st_atime_ns, stat_result.st_mtime_ns + 1_000_000_000))
+
+            result = perform_sync(config, logger=self._logger())
+
+        self.assertFalse(result.skipped_unchanged)
+        self.assertTrue(result.changed)
 
     def test_changed_sync_logs_which_hosts_changed(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

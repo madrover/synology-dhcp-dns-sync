@@ -32,6 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sync_parser = subparsers.add_parser("sync", parents=[common], help="Perform one DHCP-to-DNS sync.")
     sync_parser.add_argument("--dry-run", action="store_true", help="Render and validate without writing live zones.")
+    sync_parser.add_argument("--force", action="store_true", help="Sync even if no input changed since the last run.")
 
     subparsers.add_parser("validate-config", parents=[common], help="Validate config, paths, and live zone baselines.")
     subparsers.add_parser("watch", parents=[common], help="Poll DHCP sources and sync when they change.")
@@ -60,7 +61,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         config = load_config(args.config)
         if args.command == "sync":
-            result = perform_sync(config, dry_run=args.dry_run, logger=logger)
+            result = perform_sync(config, dry_run=args.dry_run, force=args.force, logger=logger)
+            if result.skipped_unchanged:
+                return 0
             # Unchanged runs happen every minute; only log them when asked to.
             logger.log(
                 logging.INFO if result.changed or result.dry_run else logging.DEBUG,
@@ -91,6 +94,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
     except SyncError as exc:
         logger.error(str(exc))
+        return 1
+    except Exception:
+        # Log the traceback to the log file too, and exit non-zero so DSM's
+        # "abnormal termination" email fires.
+        logger.exception("Unexpected error.")
         return 1
 
     parser.error(f"Unsupported command: {args.command}")

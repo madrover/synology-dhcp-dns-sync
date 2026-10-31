@@ -70,7 +70,11 @@ Create a scheduled task in DSM:
 
 The last run time defaults to the first run time's hour, which makes the task run only from 00:00 to 00:59. Check the generated line in `/etc/crontab`: the hour field must be `*` or list every hour, not `0`.
 
-Runs where no lease changed write nothing and don't reload DNS. A run that changes a zone backs up the live zone into `work_dir` first. The last 20 backups per zone are kept, and leftover candidate files are removed. Candidates from `sync --dry-run` stay in `work_dir` until the next scheduled run.
+In the task's **Settings**, enable **Send run details by email** and **Send run details only when the script terminates abnormally** (requires DSM email notifications). Every failure exits non-zero, so you get an email when a sync fails, and nothing otherwise.
+
+A run first compares its inputs (DHCP source files, live zones, config, tool version) with the last successful run, recorded in `work_dir/sync-state.json`. If none changed, it stops there. Otherwise it rebuilds the zones; when no record changed, it writes nothing and doesn't reload DNS. Pass `--force` to skip the input comparison, or delete `sync-state.json`.
+
+A run that changes a zone backs up the live zone into `work_dir` first. The last 20 backups per zone are kept, and leftover candidate files are removed. Candidates from `sync --dry-run` stay in `work_dir` until the next scheduled run.
 
 Script:
 
@@ -85,6 +89,22 @@ The wrapper script sets `PYTHONPATH` for the repo layout and invokes the one-sho
 `--log-file` writes to a file that rotates at 1 MB, keeping 5 old files (`sync.log.1` … `sync.log.5`). Don't also redirect output with `>>`: the file would be written twice, and the redirect bypasses rotation.
 
 At the default level the log only records events: zone changes (which hosts were added, removed or moved), skipped leases (warnings) and failures. A run where nothing changed writes nothing. Add `--verbose` to also log the runtime checks and every unchanged run.
+
+## Updating
+
+From a clean checkout on your workstation, deploy the committed `HEAD`:
+
+```sh
+scripts/deploy.sh <ssh-host> /volume1/homes/<user>/scripts/synology-dhcp-dns-sync
+```
+
+The script:
+- replaces `src/`, `scripts/` and `docs/`, and keeps `config.ini`, `logs/` and `work/`;
+- writes the commit to `DEPLOYED_COMMIT`;
+- deletes `work/sync-state.json`, so the next scheduled run does a full sync with the new code;
+- checks that the package imports with the NAS's Python.
+
+It refuses to run with uncommitted changes. DSM's `scp` resolves paths relative to shares, so the script streams a `git archive` over `ssh` instead.
 
 ## Optional Watcher Mode
 
